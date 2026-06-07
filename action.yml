@@ -1,124 +1,114 @@
 name: 'Busbar — sf-busbar-setup'
 description: >-
-  Install + configure Busbar in a target org and establish OIDC trust, so
-  GitHub workflows can token-exchange against it. This action is a thin CI
-  wrapper around the CANONICAL orchestrator `sf busbar setup` (the
-  sf-busbar-plugin) — it does NOT reimplement setup. The single source of truth
-  for "what setup does" is the plugin / docs/architecture/org-setup-contract.md.
+  Make a Salesforce org Busbar-ready (install packages, ECA OAuth policy,
+  permission set, token-exchange handler) and establish NARROW OIDC trust from
+  on-disk JSON specs — by running the Rust `sf-busbar-setup` binary directly.
+  NO Node, NO Salesforce CLI, NO plugin: the binary IS the headless reconciler
+  and downloads in <1s from actions-dist.
 author: 'Busbar'
 
-# Unlike the Rust action binaries, setup runs the published sf CLI plugin, so
-# this is the one action that brings Node + the sf CLI into the suite (a
-# deliberate trade-off to avoid forking the setup orchestrator).
+# NOTE: this action runs the Rust binary, NOT `sf busbar setup` (the plugin). The
+# plugin remains the INTERACTIVE / subscriber path; CI never shells out to the SF
+# CLI just to run a setup we ship as a sub-second binary. The binary currently
+# covers package + ECA policy + permset + handler + trust; the plugin's `site`
+# (webhook) and `catalog` steps are NOT yet ported — fine for `busbar-suite`,
+# which needs neither. (See repo memory: rust-binary-is-setup-no-sf-cli.)
 inputs:
-  plugin-version:
-    description: 'sf-busbar-plugin version/dist-tag to install (the published plugin bakes the released package 04t ids).'
-    required: false
-    default: 'latest'
-  phase:
-    description: 'sf busbar setup --phase (all | install | config | site | handler | permsets | catalog).'
-    required: false
-    default: 'all'
-  install-mode:
-    description: 'sf busbar setup --install-mode (auto | package | source). auto => managed install on a fresh org.'
-    required: false
-    default: 'auto'
-  execution-user:
-    description: 'Apex execution user / run-as for the handler. Empty => the authenticated (scratch admin) user.'
-    required: false
-    default: ''
-  configure-browser-eca:
-    description: 'Also configure the browser ECA envelope. Off by default for ephemeral scratch targets.'
+  # ---- Packages to install (released 04t ids or aliases) ----
+  busbar-package:
+    description: 'busbar (core) package version — 04t id or alias.'
+    required: true
+  github-package:
+    description: 'busbar-github (adapter) package version — 04t id or alias.'
+    required: true
+  skip-nebula:
+    description: 'Skip the Nebula Logger dependency install.'
     required: false
     default: 'false'
-  # --- Trust establishment: map the acting workflow's OIDC claims -> a run-as user in this org ---
-  trust-bootstrap:
-    description: 'Seed an Allow trust rule for the workflow that will act on this org.'
-    required: false
-    default: 'true'
-  trust-repository:
-    description: 'GitHub repository claim to trust (owner/repo).'
-    required: false
-    default: ${{ github.repository }}
-  trust-environment:
-    description: 'GitHub environment claim to match (optional).'
+  execution-user:
+    description: 'Apex execution / run-as user for the handler. Empty => the authenticated (scratch admin) session user.'
     required: false
     default: ''
-  trust-ref:
-    description: 'Git ref claim to match.'
+  api-version:
+    description: 'Salesforce API version for deploys/queries.'
     required: false
-    default: ${{ github.ref }}
-  trust-workflow-ref:
-    description: 'job_workflow_ref claim to match (the acting workflow).'
-    required: false
-    default: ${{ github.workflow_ref }}
-  trust-salesforce-username:
-    description: 'Salesforce run-as username the trust rule maps to. Empty => the authenticated user.'
+    default: '66.0'
+
+  # ---- Trust: ONLY from on-disk JSON specs, fully-specific by construction ----
+  trust-specs:
+    description: >-
+      Path to a JSON trust-rule spec file (or a directory of *.json specs)
+      relative to the checked-out repo. Each rule's claims (repository, workflow
+      basename, ref, environment) are REQUIRED named fields — a broad rule can't
+      be expressed. The run-as is always the authenticated (scratch admin)
+      session user. Empty => skip the trust phase.
     required: false
     default: ''
 
-# Consumes the target org session from the calling job's env (e.g. the `scratch`
-# Environment populated by sf-org-create -> gh-env-scratch-save):
-#   SF_ACCESS_TOKEN, SF_INSTANCE_URL
+  # ---- Auth: the freshly-minted scratch ADMIN session (handed-off token path) ----
+  # For a fresh scratch we hold the creation session transiently to bootstrap trust,
+  # then it is disposed. SF_ACCESS_TOKEN + SF_INSTANCE_URL come from the `scratch`
+  # Environment that sf-org-create -> gh-env-scratch-save populated.
+  sf-access-token:
+    description: 'Salesforce session access token for the target org (the scratch admin session).'
+    required: false
+    default: ''
+  sf-instance-url:
+    description: 'Salesforce instance URL of the target org.'
+    required: false
+    default: ''
+  # ---- OPTIONAL OIDC self-mint path (for an already-trusted target) ----
+  target-instance:
+    description: 'OPTIONAL: instance URL to OIDC-self-mint against instead of a handed-off token (requires id-token: write + an existing trust rule).'
+    required: false
+    default: ''
+  eca-client-id:
+    description: 'OPTIONAL ECA consumer key override for the OIDC exchange.'
+    required: false
+    default: ''
+  token-handler:
+    description: 'OPTIONAL Apex token-exchange handler dev name override.'
+    required: false
+    default: ''
+
+  # ---- Binary fetch ----
+  version:
+    description: 'sf-busbar-setup release tag to download (e.g. 0.0.9). "latest" resolves the most recent release.'
+    required: false
+    default: 'latest'
+  binary-repo:
+    description: 'GitHub repo that publishes the sf-busbar-setup binary releases.'
+    required: false
+    default: 'busbar-actions/actions-dist'
+
 runs:
   using: 'composite'
   steps:
-    - name: Set up Node.js
-      uses: actions/setup-node@v4
+    - name: Install the sf-busbar-setup binary from actions-dist (<1s, no SF CLI)
+      uses: busbar-actions/setup@main
       with:
-        node-version: '20'
+        binary: sf-busbar-setup
+        version: ${{ inputs.version }}
+        binary-repo: ${{ inputs.binary-repo }}
 
-    - name: Install Salesforce CLI + Busbar plugin
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "▶ Installing the managed Salesforce CLI + sf-busbar-plugin@${{ inputs.plugin-version }} (output shown, not hidden)"
-        npm install --global @salesforce/cli
-        # oclif prompts to confirm a non-signed plugin; auto-confirm.
-        echo 'y' | sf plugins install "sf-busbar-plugin@${{ inputs.plugin-version }}"
-        echo "✓ installed CLI + plugin:"
-        sf version --verbose | sed -n '1,40p'
-
-    - name: Authenticate to the target org (access token)
-      id: auth
+    - name: Make the org Busbar-ready + establish narrow trust (binary self-runs)
       shell: bash
       env:
-        SFDX_ACCESS_TOKEN: ${{ env.SF_ACCESS_TOKEN }}
-        SF_INSTANCE_URL: ${{ env.SF_INSTANCE_URL }}
+        BUSBAR_PACKAGE: ${{ inputs.busbar-package }}
+        BUSBAR_GITHUB_PACKAGE: ${{ inputs.github-package }}
+        BUSBAR_SKIP_NEBULA: ${{ inputs.skip-nebula }}
+        BUSBAR_EXECUTION_USER: ${{ inputs.execution-user }}
+        BUSBAR_API_VERSION: ${{ inputs.api-version }}
+        BUSBAR_TRUST_SPECS: ${{ inputs.trust-specs }}
+        # Auth: handed-off scratch-admin token by default; OIDC self-mint if
+        # target-instance is set and no token is provided. busbar-auth
+        # session_from_env uses SF_ACCESS_TOKEN+SF_INSTANCE_URL when both present,
+        # else OIDC. The session is disposed (zeroized) at binary exit.
+        SF_ACCESS_TOKEN: ${{ inputs.sf-access-token }}
+        SF_INSTANCE_URL: ${{ inputs.target-instance != '' && inputs.target-instance || inputs.sf-instance-url }}
+        ECA_CLIENT_ID: ${{ inputs.eca-client-id }}
+        TOKEN_HANDLER_APEX: ${{ inputs.token-handler }}
       run: |
         set -euo pipefail
-        if [[ -z "${SFDX_ACCESS_TOKEN:-}" || -z "${SF_INSTANCE_URL:-}" ]]; then
-          echo "::error::sf-busbar-setup needs SF_ACCESS_TOKEN + SF_INSTANCE_URL in the job env (the target org session)."
-          exit 1
-        fi
-        sf org login access-token --instance-url "${SF_INSTANCE_URL}" --alias busbar-target --no-prompt
-        runas="$(sf org display --target-org busbar-target --json | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["username"])')"
-        echo "runas=${runas}" >> "$GITHUB_OUTPUT"
-        echo "Authenticated to ${SF_INSTANCE_URL} as ${runas}"
-
-    - name: Set up Busbar + establish trust
-      shell: bash
-      run: |
-        set -euo pipefail
-        runas="${{ steps.auth.outputs.runas }}"
-        exec_user="${{ inputs.execution-user }}"; exec_user="${exec_user:-$runas}"
-        trust_user="${{ inputs.trust-salesforce-username }}"; trust_user="${trust_user:-$runas}"
-
-        args=( --target-org busbar-target
-               --phase "${{ inputs.phase }}"
-               --install-mode "${{ inputs.install-mode }}"
-               --execution-user "${exec_user}" )
-
-        [[ "${{ inputs.configure-browser-eca }}" == "true" ]] || args+=( --no-configure-browser-eca )
-
-        if [[ "${{ inputs.trust-bootstrap }}" == "true" ]]; then
-          args+=( --trust-bootstrap
-                  --trust-repository "${{ inputs.trust-repository }}"
-                  --trust-ref "${{ inputs.trust-ref }}"
-                  --trust-workflow-ref "${{ inputs.trust-workflow-ref }}"
-                  --trust-salesforce-username "${trust_user}" )
-          [[ -n "${{ inputs.trust-environment }}" ]] && args+=( --trust-environment "${{ inputs.trust-environment }}" )
-        fi
-
-        echo "Running: sf busbar setup ${args[*]}"
-        sf busbar setup "${args[@]}"
+        echo "Running sf-busbar-setup against ${SF_INSTANCE_URL} (trust-specs='${BUSBAR_TRUST_SPECS:-<none>}')"
+        sf-busbar-setup
