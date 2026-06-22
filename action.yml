@@ -99,7 +99,10 @@ runs:
         BUSBAR_SKIP_NEBULA: ${{ inputs.skip-nebula }}
         BUSBAR_EXECUTION_USER: ${{ inputs.execution-user }}
         BUSBAR_API_VERSION: ${{ inputs.api-version }}
-        BUSBAR_TRUST_SPECS: ${{ inputs.trust-specs }}
+        # Raw input only — exported as BUSBAR_TRUST_SPECS in the run step ONLY when
+        # non-empty. An empty value would make the binary's clap reject
+        # --trust-specs ("a value is required"); empty => skip the trust phase.
+        INPUT_TRUST_SPECS: ${{ inputs.trust-specs }}
         # Auth: handed-off scratch-admin token by default; OIDC self-mint if
         # target-instance is set and no token is provided. busbar-auth
         # session_from_env uses SF_ACCESS_TOKEN+SF_INSTANCE_URL when both present,
@@ -110,5 +113,10 @@ runs:
         TOKEN_HANDLER_APEX: ${{ inputs.token-handler }}
       run: |
         set -euo pipefail
-        echo "Running sf-busbar-setup against ${SF_INSTANCE_URL} (trust-specs='${BUSBAR_TRUST_SPECS:-<none>}')"
+        # Only export BUSBAR_TRUST_SPECS when non-empty so the binary sees it as
+        # absent (skip trust) rather than an empty value clap rejects.
+        if [ -n "${INPUT_TRUST_SPECS:-}" ]; then
+          export BUSBAR_TRUST_SPECS="$INPUT_TRUST_SPECS"
+        fi
+        echo "Running sf-busbar-setup against ${SF_INSTANCE_URL} (trust-specs='${INPUT_TRUST_SPECS:-<none>}')"
         sf-busbar-setup
