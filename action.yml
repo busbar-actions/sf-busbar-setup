@@ -45,6 +45,17 @@ inputs:
     required: false
     default: ''
 
+  # ---- Hub: OPTIONAL registration with a Busbar Hub org ----
+  hub-instance-url:
+    description: >-
+      OPTIONAL: instance URL of a Busbar Hub org to register this org with
+      (POST hub/v1/orgs, an idempotent upsert). Authenticated INDEPENDENTLY of
+      the target-org session via its own OIDC exchange — requires
+      `permissions: id-token: write` on the caller's job. Empty => skip Hub
+      registration entirely.
+    required: false
+    default: ''
+
   # ---- Auth: the freshly-minted scratch ADMIN session (handed-off token path) ----
   # For a fresh scratch we hold the creation session transiently to bootstrap trust,
   # then it is disposed. SF_ACCESS_TOKEN + SF_INSTANCE_URL come from the `scratch`
@@ -103,6 +114,9 @@ runs:
         # non-empty. An empty value would make the binary's clap reject
         # --trust-specs ("a value is required"); empty => skip the trust phase.
         INPUT_TRUST_SPECS: ${{ inputs.trust-specs }}
+        # Same empty-value caveat as INPUT_TRUST_SPECS — exported ONLY when
+        # non-empty, below.
+        INPUT_HUB_INSTANCE_URL: ${{ inputs.hub-instance-url }}
         # Auth: handed-off scratch-admin token by default; OIDC self-mint if
         # target-instance is set and no token is provided. busbar-auth
         # session_from_env uses SF_ACCESS_TOKEN+SF_INSTANCE_URL when both present,
@@ -118,5 +132,9 @@ runs:
         if [ -n "${INPUT_TRUST_SPECS:-}" ]; then
           export BUSBAR_TRUST_SPECS="$INPUT_TRUST_SPECS"
         fi
-        echo "Running sf-busbar-setup against ${SF_INSTANCE_URL} (trust-specs='${INPUT_TRUST_SPECS:-<none>}')"
+        # Same for BUSBAR_HUB_INSTANCE_URL — empty means skip Hub registration.
+        if [ -n "${INPUT_HUB_INSTANCE_URL:-}" ]; then
+          export BUSBAR_HUB_INSTANCE_URL="$INPUT_HUB_INSTANCE_URL"
+        fi
+        echo "Running sf-busbar-setup against ${SF_INSTANCE_URL} (trust-specs='${INPUT_TRUST_SPECS:-<none>}', hub='${INPUT_HUB_INSTANCE_URL:-<none>}')"
         sf-busbar-setup
