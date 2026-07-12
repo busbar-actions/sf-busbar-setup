@@ -56,23 +56,17 @@ inputs:
     required: false
     default: ''
 
-  # ---- Auth: the freshly-minted scratch ADMIN session (handed-off token path) ----
-  # For a fresh scratch we hold the creation session transiently to bootstrap trust,
-  # then it is disposed. SF_ACCESS_TOKEN + SF_INSTANCE_URL come from the `scratch`
-  # Environment that sf-org-create -> gh-env-scratch-save populated.
-  sf-access-token:
-    description: 'Salesforce session access token for the target org (the scratch admin session).'
-    required: false
-    default: ''
-  sf-instance-url:
-    description: 'Salesforce instance URL of the target org.'
-    required: false
-    default: ''
-  # ---- OPTIONAL OIDC self-mint path (for an already-trusted target) ----
+  # ---- Auth: OIDC self-mint ONLY, against an ALREADY-TRUSTED target ----
+  # There is no handed-off-token path — a Salesforce access token must never be
+  # passed as an action input, no exceptions. The one legitimate bootstrap case
+  # (a freshly-created scratch org with no trust yet) is handled by sf-org-create
+  # calling this action's underlying logic in-process as a library, never through
+  # a `uses: busbar-actions/sf-busbar-setup@main` invocation with a token. This
+  # action is for re-running setup (e.g. adding more trust rules, reinstalling/
+  # upgrading packages) against an org that is ALREADY trusted.
   target-instance:
-    description: 'OPTIONAL: instance URL to OIDC-self-mint against instead of a handed-off token (requires id-token: write + an existing trust rule).'
-    required: false
-    default: ''
+    description: 'Instance URL to OIDC-self-mint against (requires id-token: write + an existing trust rule).'
+    required: true
   eca-client-id:
     description: 'OPTIONAL ECA consumer key override for the OIDC exchange.'
     required: false
@@ -117,12 +111,9 @@ runs:
         # Same empty-value caveat as INPUT_TRUST_SPECS — exported ONLY when
         # non-empty, below.
         INPUT_HUB_INSTANCE_URL: ${{ inputs.hub-instance-url }}
-        # Auth: handed-off scratch-admin token by default; OIDC self-mint if
-        # target-instance is set and no token is provided. busbar-auth
-        # session_from_env uses SF_ACCESS_TOKEN+SF_INSTANCE_URL when both present,
-        # else OIDC. The session is disposed (zeroized) at binary exit.
-        SF_ACCESS_TOKEN: ${{ inputs.sf-access-token }}
-        SF_INSTANCE_URL: ${{ inputs.target-instance != '' && inputs.target-instance || inputs.sf-instance-url }}
+        # Auth: OIDC self-mint only, against target-instance (must already be
+        # trusted). The session is disposed (zeroized) at binary exit.
+        SF_INSTANCE_URL: ${{ inputs.target-instance }}
         ECA_CLIENT_ID: ${{ inputs.eca-client-id }}
         TOKEN_HANDLER_APEX: ${{ inputs.token-handler }}
       run: |
